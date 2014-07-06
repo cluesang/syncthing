@@ -43,8 +43,9 @@ func (s *Set) Replace(node protocol.NodeID, fs []scanner.File) {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if ldbReplace(s.db, []byte(s.repo), node[:], fs) {
-		s.changes[node]++
+	ts := ldbReplace(s.db, []byte(s.repo), node[:], fs)
+	if ts > s.changes[node] {
+		s.changes[node] = ts
 	}
 }
 
@@ -54,8 +55,9 @@ func (s *Set) ReplaceWithDelete(node protocol.NodeID, fs []scanner.File) {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if ldbReplaceWithDelete(s.db, []byte(s.repo), node[:], fs) {
-		s.changes[node]++
+	ts := ldbReplaceWithDelete(s.db, []byte(s.repo), node[:], fs)
+	if ts > s.changes[node] {
+		s.changes[node] = ts
 	}
 }
 
@@ -65,8 +67,9 @@ func (s *Set) Update(node protocol.NodeID, fs []scanner.File) {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if ldbUpdate(s.db, []byte(s.repo), node[:], fs) {
-		s.changes[node]++
+	ts := ldbUpdate(s.db, []byte(s.repo), node[:], fs)
+	if ts > s.changes[node] {
+		s.changes[node] = ts
 	}
 }
 
