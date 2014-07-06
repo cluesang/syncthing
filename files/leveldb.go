@@ -2,7 +2,9 @@ package files
 
 import (
 	"bytes"
+	"encoding/binary"
 	"sort"
+	"time"
 
 	"github.com/calmh/syncthing/lamport"
 	"github.com/calmh/syncthing/protocol"
@@ -57,7 +59,7 @@ keyTypeNode (1 byte)
         node (32 bytes)
             name (variable size)
             	|
-            	scanner.File
+				<8 byte timestamp, scanner.File>
 
 keyTypeGlobal (1 byte)
 	repository (64 bytes)
@@ -154,7 +156,8 @@ func ldbGenericReplace(db *leveldb.DB, repo, node []byte, fs []scanner.File, del
 		case cmp == 0:
 			// File exists on both sides - compare versions.
 			var ef scanner.File
-			ef.UnmarshalXDR(dbi.Value())
+			bs := dbi.Value()
+			ef.UnmarshalXDR(bs[8:])
 			if fs[fsi].Version > ef.Version {
 				ldbInsert(batch, repo, node, newName, fs[fsi])
 				ldbUpdateGlobal(snap, batch, repo, node, newName, fs[fsi].Version)
@@ -197,7 +200,8 @@ func ldbReplace(db *leveldb.DB, repo, node []byte, fs []scanner.File) bool {
 func ldbReplaceWithDelete(db *leveldb.DB, repo, node []byte, fs []scanner.File) bool {
 	return ldbGenericReplace(db, repo, node, fs, func(db dbReader, batch dbWriter, repo, node, name []byte, dbi iterator.Iterator) bool {
 		var f scanner.File
-		err := f.UnmarshalXDR(dbi.Value())
+		bs := dbi.Value()
+		err := f.UnmarshalXDR(bs[8:])
 		if err != nil {
 			panic(err)
 		}
@@ -208,7 +212,7 @@ func ldbReplaceWithDelete(db *leveldb.DB, repo, node []byte, fs []scanner.File) 
 			f.Blocks = nil
 			f.Version = lamport.Default.Tick(f.Version)
 			f.Flags |= protocol.FlagDeleted
-			batch.Put(dbi.Key(), f.MarshalXDR())
+			ldbInsert(batch, repo, node, name, f)
 			ldbUpdateGlobal(db, batch, repo, node, nodeKeyName(dbi.Key()), f.Version)
 			return true
 		}
@@ -224,6 +228,7 @@ func ldbUpdate(db *leveldb.DB, repo, node []byte, fs []scanner.File) bool {
 	}
 	defer snap.Release()
 
+	updated := false
 	for _, f := range fs {
 		name := []byte(f.Name)
 		fk := nodeKey(repo, node, name)
@@ -231,17 +236,19 @@ func ldbUpdate(db *leveldb.DB, repo, node []byte, fs []scanner.File) bool {
 		if err == leveldb.ErrNotFound {
 			ldbInsert(batch, repo, node, name, f)
 			ldbUpdateGlobal(snap, batch, repo, node, name, f.Version)
+			updated = true
 			continue
 		}
 
 		var ef scanner.File
-		err = ef.UnmarshalXDR(bs)
+		err = ef.UnmarshalXDR(bs[8:])
 		if err != nil {
 			panic(err)
 		}
 		if ef.Version != f.Version {
 			ldbInsert(batch, repo, node, name, f)
 			ldbUpdateGlobal(snap, batch, repo, node, name, f.Version)
+			updated = true
 		}
 	}
 
@@ -250,7 +257,7 @@ func ldbUpdate(db *leveldb.DB, repo, node []byte, fs []scanner.File) bool {
 		panic(err)
 	}
 
-	return true
+	return updated
 }
 
 func ldbInsert(batch dbWriter, repo, node, name []byte, file scanner.File) {
@@ -258,8 +265,11 @@ func ldbInsert(batch dbWriter, repo, node, name []byte, file scanner.File) {
 		l.Debugf("insert; repo=%q node=%x %v", repo, node, file)
 	}
 
+	buf := make([]byte, 8, 128)
+	binary.BigEndian.PutUint64(buf, uint64(time.Now().UnixNano()))
+	buf = file.AppendXDR(buf)
 	nk := nodeKey(repo, node, name)
-	batch.Put(nk, file.MarshalXDR())
+	batch.Put(nk, buf)
 }
 
 // ldbUpdateGlobal adds this node+version to the version list for the given
@@ -350,7 +360,7 @@ func ldbRemoveFromGlobal(db dbReader, batch dbWriter, repo, node, file []byte) {
 	}
 }
 
-func ldbWithHave(db *leveldb.DB, repo, node []byte, fn fileIterator) {
+func ldbWithHave(db *leveldb.DB, repo, node []byte, since uint64, fn fileIterator) uint64 {
 	start := nodeKey(repo, node, nil)                            // before all repo/node files
 	limit := nodeKey(repo, node, []byte{0xff, 0xff, 0xff, 0xff}) // after all repo/node files
 	snap, err := db.GetSnapshot()
@@ -361,16 +371,25 @@ func ldbWithHave(db *leveldb.DB, repo, node []byte, fn fileIterator) {
 	dbi := snap.NewIterator(&util.Range{Start: start, Limit: limit}, nil)
 	defer dbi.Release()
 
+	var maxTs uint64
 	for dbi.Next() {
 		var f scanner.File
-		err := f.UnmarshalXDR(dbi.Value())
-		if err != nil {
-			panic(err)
+		bs := dbi.Value()
+		ts := binary.BigEndian.Uint64(bs[:8])
+		if ts > maxTs {
+			maxTs = ts
 		}
-		if cont := fn(f); !cont {
-			return
+		if ts > since {
+			err := f.UnmarshalXDR(bs[8:])
+			if err != nil {
+				panic(err)
+			}
+			if cont := fn(f); !cont {
+				return maxTs
+			}
 		}
 	}
+	return maxTs
 }
 
 func ldbGet(db *leveldb.DB, repo, node, file []byte) scanner.File {
@@ -384,7 +403,7 @@ func ldbGet(db *leveldb.DB, repo, node, file []byte) scanner.File {
 	}
 
 	var f scanner.File
-	err = f.UnmarshalXDR(bs)
+	err = f.UnmarshalXDR(bs[8:])
 	if err != nil {
 		panic(err)
 	}
@@ -424,7 +443,7 @@ func ldbGetGlobal(db *leveldb.DB, repo, file []byte) scanner.File {
 	}
 
 	var f scanner.File
-	err = f.UnmarshalXDR(bs)
+	err = f.UnmarshalXDR(bs[8:])
 	if err != nil {
 		panic(err)
 	}
@@ -452,6 +471,7 @@ func ldbWithGlobal(db *leveldb.DB, repo []byte, fn fileIterator) {
 			l.Debugln(dbi.Key())
 			panic("no versions?")
 		}
+
 		fk := nodeKey(repo, vl.versions[0].node, globalKeyName(dbi.Key()))
 		bs, err := snap.Get(fk, nil)
 		if err != nil {
@@ -459,7 +479,7 @@ func ldbWithGlobal(db *leveldb.DB, repo []byte, fn fileIterator) {
 		}
 
 		var f scanner.File
-		err = f.UnmarshalXDR(bs)
+		err = f.UnmarshalXDR(bs[8:])
 		if err != nil {
 			panic(err)
 		}
@@ -545,7 +565,7 @@ func ldbWithNeed(db *leveldb.DB, repo, node []byte, fn fileIterator) {
 			}
 
 			var gf scanner.File
-			err = gf.UnmarshalXDR(bs)
+			err = gf.UnmarshalXDR(bs[8:])
 			if err != nil {
 				panic(err)
 			}

@@ -77,11 +77,11 @@ func (s *Set) WithNeed(node protocol.NodeID, fn fileIterator) {
 	ldbWithNeed(s.db, []byte(s.repo), node[:], fn)
 }
 
-func (s *Set) WithHave(node protocol.NodeID, fn fileIterator) {
+func (s *Set) WithHave(node protocol.NodeID, since uint64, fn fileIterator) uint64 {
 	if debug {
 		l.Debugf("%s WithHave(%v)", s.repo, node)
 	}
-	ldbWithHave(s.db, []byte(s.repo), node[:], fn)
+	return ldbWithHave(s.db, []byte(s.repo), node[:], since, fn)
 }
 
 func (s *Set) WithGlobal(fn fileIterator) {

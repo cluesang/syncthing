@@ -257,7 +257,7 @@ func (m *Model) LocalSize(repo string) (files, deleted int, bytes int64) {
 	m.rmut.RLock()
 	defer m.rmut.RUnlock()
 	if rf, ok := m.repoFiles[repo]; ok {
-		rf.WithHave(protocol.LocalNodeID, func(f scanner.File) bool {
+		rf.WithHave(protocol.LocalNodeID, 0, func(f scanner.File) bool {
 			fs, de, by := sizeOfFile(f)
 			files += fs
 			deleted += de
@@ -555,7 +555,7 @@ func (m *Model) protocolIndex(repo string) []protocol.FileInfo {
 	var index []protocol.FileInfo
 
 	var fs []scanner.File
-	m.repoFiles[repo].WithHave(protocol.LocalNodeID, func(f scanner.File) bool {
+	m.repoFiles[repo].WithHave(protocol.LocalNodeID, 0, func(f scanner.File) bool {
 		fs = append(fs, f)
 		return true
 	})
